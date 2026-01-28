@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Generator
+from typing import Optional, Generator, Any, TYPE_CHECKING
 import logging
 import re
 import httpx
@@ -12,7 +14,7 @@ try:
     INSTALOADER_AVAILABLE = True
 except ImportError:
     INSTALOADER_AVAILABLE = False
-    instaloader = None
+    instaloader = None  # type: ignore
 
 from app.core.config import settings
 from app.core.database import execute_write, execute_query
@@ -184,7 +186,7 @@ class InstagramService:
         return downloaded
 
     def _convert_post(
-        self, insta_post: instaloader.Post, account_username: str
+        self, insta_post: Any, account_username: str
     ) -> Optional[Post]:
         """Convert Instaloader post to our Post model."""
         try:
