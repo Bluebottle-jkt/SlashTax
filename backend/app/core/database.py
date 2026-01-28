@@ -2,10 +2,34 @@ from neo4j import GraphDatabase, Driver
 from contextlib import contextmanager
 from typing import Generator, Any
 import logging
+from datetime import datetime
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_neo4j_types(value: Any) -> Any:
+    """Convert Neo4j types to standard Python types for JSON serialization."""
+    if value is None:
+        return None
+    # Handle Neo4j DateTime
+    if hasattr(value, 'to_native'):
+        return value.to_native()
+    if hasattr(value, 'iso_format'):
+        return value.iso_format()
+    # Handle lists
+    if isinstance(value, list):
+        return [_convert_neo4j_types(v) for v in value]
+    # Handle dicts
+    if isinstance(value, dict):
+        return {k: _convert_neo4j_types(v) for k, v in value.items()}
+    return value
+
+
+def sanitize_record(record: dict) -> dict:
+    """Sanitize a Neo4j record, converting all special types to Python types."""
+    return _convert_neo4j_types(record)
 
 
 class Neo4jConnection:
@@ -76,14 +100,14 @@ def init_database() -> None:
 
 
 def execute_query(query: str, parameters: dict[str, Any] | None = None) -> list[dict]:
-    """Execute a Cypher query and return results."""
+    """Execute a Cypher query and return results with sanitized types."""
     with Neo4jConnection.get_session() as session:
         result = session.run(query, parameters or {})
-        return [record.data() for record in result]
+        return [sanitize_record(record.data()) for record in result]
 
 
 def execute_write(query: str, parameters: dict[str, Any] | None = None) -> Any:
-    """Execute a write query within a transaction."""
+    """Execute a write query within a transaction with sanitized results."""
     with Neo4jConnection.get_session() as session:
         result = session.execute_write(lambda tx: tx.run(query, parameters or {}).data())
-        return result
+        return [sanitize_record(r) for r in result] if result else result

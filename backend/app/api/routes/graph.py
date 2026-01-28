@@ -185,6 +185,72 @@ async def get_clusters():
     return [r["cluster"] for r in results]
 
 
+@router.get("/faces")
+async def list_faces(skip: int = 0, limit: int = 100, unassigned_only: bool = False):
+    """List all detected faces."""
+    from app.core.database import execute_query
+
+    where_clause = "WHERE NOT (f)-[:BELONGS_TO]->(:Person)" if unassigned_only else ""
+
+    query = f"""
+    MATCH (f:Face)
+    {where_clause}
+    OPTIONAL MATCH (f)-[:APPEARS_IN]->(p:Post)
+    OPTIONAL MATCH (f)-[:BELONGS_TO]->(person:Person)
+    OPTIONAL MATCH (f)-[:IN_CLUSTER]->(c:FaceCluster)
+    RETURN {{
+        id: f.id,
+        crop_path: f.crop_path,
+        post_id: p.id,
+        post_shortcode: p.shortcode,
+        person_id: person.id,
+        person_name: person.name,
+        cluster_id: c.id,
+        cluster_label: c.label,
+        created_at: f.created_at
+    }} as face
+    ORDER BY f.created_at DESC
+    SKIP $skip
+    LIMIT $limit
+    """
+
+    results = execute_query(query, {"skip": skip, "limit": limit})
+    return [r["face"] for r in results]
+
+
+@router.get("/faces/{face_id}")
+async def get_face(face_id: str):
+    """Get a specific face with its relationships."""
+    from app.core.database import execute_query
+    from fastapi import HTTPException
+
+    query = """
+    MATCH (f:Face {id: $face_id})
+    OPTIONAL MATCH (f)-[:APPEARS_IN]->(p:Post)
+    OPTIONAL MATCH (f)-[:BELONGS_TO]->(person:Person)
+    OPTIONAL MATCH (f)-[:IN_CLUSTER]->(c:FaceCluster)
+    RETURN {
+        id: f.id,
+        crop_path: f.crop_path,
+        bounding_box: f.bounding_box,
+        post_id: p.id,
+        post_shortcode: p.shortcode,
+        person_id: person.id,
+        person_name: person.name,
+        cluster_id: c.id,
+        cluster_label: c.label,
+        created_at: f.created_at
+    } as face
+    """
+
+    results = execute_query(query, {"face_id": face_id})
+
+    if not results or not results[0].get("face"):
+        raise HTTPException(status_code=404, detail="Face not found")
+
+    return results[0]["face"]
+
+
 @router.get("/timeline")
 async def get_timeline(
     start_date: Optional[str] = None,

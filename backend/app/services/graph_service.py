@@ -1,5 +1,6 @@
 from typing import Optional, Any
 import logging
+from datetime import datetime
 
 from app.core.database import execute_query, execute_write
 from app.schemas.models import (
@@ -8,6 +9,45 @@ from app.schemas.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_value(value: Any) -> Any:
+    """Convert Neo4j types to JSON-serializable Python types."""
+    if value is None:
+        return None
+    # Handle Neo4j DateTime
+    if hasattr(value, 'iso_format'):
+        return value.iso_format()
+    if hasattr(value, 'isoformat'):
+        return value.isoformat()
+    # Handle lists
+    if isinstance(value, list):
+        return [_serialize_value(v) for v in value]
+    # Handle dicts
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+    return value
+
+
+def _sanitize_properties(props: dict) -> dict:
+    """Sanitize all properties to be JSON-serializable."""
+    if not props:
+        return {}
+    return {k: _serialize_value(v) for k, v in props.items()}
+
+
+def _sanitize_node(n: dict) -> dict:
+    """Sanitize a node dict for GraphNode creation."""
+    if n.get("properties"):
+        n["properties"] = _sanitize_properties(n["properties"])
+    return n
+
+
+def _sanitize_edge(e: dict) -> dict:
+    """Sanitize an edge dict for GraphEdge creation."""
+    if e.get("properties"):
+        e["properties"] = _sanitize_properties(e["properties"])
+    return e
 
 
 class GraphService:
@@ -23,7 +63,11 @@ class GraphService:
         RETURN
             collect(DISTINCT {
                 id: coalesce(n.id, id(n)),
-                label: coalesce(n.name, n.username, n.shortcode, 'Unknown'),
+                label: CASE
+                    WHEN labels(n)[0] = 'Face' THEN 'Face ' + substring(n.id, 0, 8)
+                    WHEN labels(n)[0] = 'FaceCluster' THEN coalesce(n.label, 'Cluster ' + substring(n.id, 0, 8))
+                    ELSE coalesce(n.name, n.username, n.shortcode, 'Unknown')
+                END,
                 type: labels(n)[0],
                 properties: properties(n)
             }) as nodes,
@@ -41,9 +85,13 @@ class GraphService:
             return GraphData(nodes=[], edges=[])
 
         data = results[0]
-        nodes = [GraphNode(**n) for n in data.get("nodes", []) if n.get("id")]
+        nodes = [
+            GraphNode(**_sanitize_node(n))
+            for n in data.get("nodes", []) if n.get("id")
+        ]
         edges = [
-            GraphEdge(**e) for e in data.get("edges", [])
+            GraphEdge(**_sanitize_edge(e))
+            for e in data.get("edges", [])
             if e.get("source") and e.get("target") and e.get("type")
         ]
 
@@ -83,8 +131,8 @@ class GraphService:
             return GraphData(nodes=[], edges=[])
 
         data = results[0]
-        nodes = [GraphNode(**n) for n in data.get("nodes", [])]
-        edges = [GraphEdge(**e) for e in data.get("edges", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in data.get("nodes", [])]
+        edges = [GraphEdge(**_sanitize_edge(e)) for e in data.get("edges", [])]
 
         return GraphData(nodes=nodes, edges=edges)
 
@@ -142,7 +190,7 @@ class GraphService:
             return GraphData(nodes=[], edges=[])
 
         all_nodes = [n for n in results[0].get("nodes", []) if n]
-        nodes = [GraphNode(**n) for n in all_nodes if n.get("id")]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in all_nodes if n.get("id")]
 
         # Get edges separately
         edge_query = """
@@ -226,7 +274,7 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def _search_persons(self, search_term: str, limit: int) -> GraphData:
@@ -248,7 +296,7 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def _search_locations(self, search_term: str, limit: int) -> GraphData:
@@ -270,7 +318,7 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def _search_captions(self, search_term: str, limit: int) -> GraphData:
@@ -298,7 +346,7 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def _search_captions_fallback(self, search_term: str, limit: int) -> GraphData:
@@ -320,7 +368,7 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def _search_hashtags(self, search_term: str, limit: int) -> GraphData:
@@ -345,58 +393,61 @@ class GraphService:
         if not results:
             return GraphData(nodes=[], edges=[])
 
-        nodes = [GraphNode(**n) for n in results[0].get("nodes", [])]
+        nodes = [GraphNode(**_sanitize_node(n)) for n in results[0].get("nodes", [])]
         return GraphData(nodes=nodes, edges=[])
 
     def get_stats(self) -> StatsResponse:
         """Get database statistics."""
-        query = """
-        MATCH (p:Person) WITH count(p) as persons
-        MATCH (post:Post) WITH persons, count(post) as posts
-        MATCH (l:Location) WITH persons, posts, count(l) as locations
-        MATCH (a:Account) WITH persons, posts, locations, count(a) as accounts
-        MATCH (h:Hashtag) WITH persons, posts, locations, accounts, count(h) as hashtags
-        OPTIONAL MATCH (:Person)-[r:APPEARS_IN]->(:Post)
-        WITH persons, posts, locations, accounts, hashtags, count(r) as faces
-        RETURN persons, posts, locations, accounts, hashtags, faces
-        """
+        # Get counts separately to handle empty collections gracefully
+        stats = {
+            "persons": 0,
+            "posts": 0,
+            "locations": 0,
+            "accounts": 0,
+            "hashtags": 0,
+            "faces": 0,
+        }
 
-        results = execute_query(query)
+        queries = [
+            ("persons", "MATCH (n:Person) RETURN count(n) as count"),
+            ("posts", "MATCH (n:Post) RETURN count(n) as count"),
+            ("locations", "MATCH (n:Location) RETURN count(n) as count"),
+            ("accounts", "MATCH (n:Account) RETURN count(n) as count"),
+            ("hashtags", "MATCH (n:Hashtag) RETURN count(n) as count"),
+            ("faces", "MATCH (n:Face) RETURN count(n) as count"),
+        ]
 
-        if not results:
-            return StatsResponse(
-                total_persons=0,
-                total_posts=0,
-                total_locations=0,
-                total_accounts=0,
-                total_hashtags=0,
-                total_faces_detected=0,
-                recent_posts=[],
-            )
-
-        data = results[0]
+        for key, query in queries:
+            try:
+                results = execute_query(query)
+                if results:
+                    stats[key] = results[0]["count"]
+            except Exception as e:
+                logger.warning(f"Error getting {key} count: {e}")
 
         # Get recent posts
         recent_query = """
         MATCH (p:Post)
-        RETURN p
+        OPTIONAL MATCH (f:Face)-[:APPEARS_IN]->(p)
+        WITH p, count(f) as faces_detected
+        RETURN p {.*, faces_detected: faces_detected} as post
         ORDER BY p.posted_at DESC
         LIMIT 10
         """
 
         recent_results = execute_query(recent_query)
         recent_posts = [
-            Post(**r["p"]) for r in recent_results
-            if r.get("p")
+            Post(**r["post"]) for r in recent_results
+            if r.get("post")
         ]
 
         return StatsResponse(
-            total_persons=data.get("persons", 0),
-            total_posts=data.get("posts", 0),
-            total_locations=data.get("locations", 0),
-            total_accounts=data.get("accounts", 0),
-            total_hashtags=data.get("hashtags", 0),
-            total_faces_detected=data.get("faces", 0),
+            total_persons=stats["persons"],
+            total_posts=stats["posts"],
+            total_locations=stats["locations"],
+            total_accounts=stats["accounts"],
+            total_hashtags=stats["hashtags"],
+            total_faces_detected=stats["faces"],
             recent_posts=recent_posts,
         )
 

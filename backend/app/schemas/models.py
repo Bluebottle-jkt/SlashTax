@@ -95,7 +95,24 @@ class Post(PostBase):
         from_attributes = True
 
 
+class Face(BaseModel):
+    """A detected face stored in the database."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    encoding: list[float]
+    bounding_box: dict[str, int]  # top, right, bottom, left
+    crop_path: Optional[str] = None
+    post_id: Optional[str] = None
+    person_id: Optional[str] = None
+    cluster_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        from_attributes = True
+
+
 class FaceDetection(BaseModel):
+    """Result of face detection (may or may not be persisted)."""
+    face_id: Optional[str] = None  # ID of persisted Face node
     person_id: Optional[str] = None
     person_name: Optional[str] = None
     confidence: float

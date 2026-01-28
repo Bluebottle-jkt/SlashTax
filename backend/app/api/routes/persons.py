@@ -235,6 +235,50 @@ async def get_person_profile(person_id: str):
     }
 
 
+@router.post("/from-face/{face_id}", response_model=Person)
+async def create_person_from_face(face_id: str, name: str, notes: Optional[str] = None):
+    """Create a new Person from an existing detected Face node.
+
+    This is the primary way to label faces after face detection.
+    The Face's encoding becomes the Person's face_encoding for future matching.
+    """
+    person = face_recognition_service.create_person_from_face_node(face_id, name)
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Face not found or has no encoding"
+        )
+
+    # Add notes if provided
+    if notes:
+        query = """
+        MATCH (p:Person {id: $id})
+        SET p.notes = $notes
+        """
+        execute_write(query, {"id": person.id, "notes": notes})
+        person.notes = notes
+
+    return person
+
+
+@router.post("/assign-face")
+async def assign_face_to_existing_person(face_id: str, person_id: str):
+    """Assign a detected Face to an existing Person.
+
+    Use this when a face matches someone who already has a Person node.
+    """
+    success = face_recognition_service.assign_face_to_person(face_id, person_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail="Face or Person not found"
+        )
+
+    return {"message": "Face assigned to person successfully"}
+
+
 @router.delete("/{person_id}")
 async def delete_person(person_id: str):
     """Delete a person and all their relationships."""

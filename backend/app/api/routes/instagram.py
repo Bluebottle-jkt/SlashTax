@@ -1,11 +1,19 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from typing import Optional
 import asyncio
 import logging
+import zipfile
+import json
+import tempfile
+import shutil
+from pathlib import Path
+from datetime import datetime
 
 from app.schemas.models import InstagramImportRequest, Account, Post
 from app.services.instagram_service import instagram_service
 from app.services.face_recognition_service import face_recognition_service
+from app.core.config import settings
+from app.core.database import execute_write
 
 logger = logging.getLogger(__name__)
 
@@ -257,3 +265,215 @@ async def search_instagram(query: str, limit: int = 20):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/import-export")
+async def import_from_export(
+    file: UploadFile = File(...),
+    process_faces: bool = True,
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Import posts from Instagram data export zip file.
+
+    This endpoint accepts the zip file you download from Instagram
+    (Settings > Your Activity > Download Your Information).
+
+    The zip typically contains:
+    - content/posts_1.json (your posts metadata)
+    - media/posts/ (your post images)
+
+    This is the recommended way to import your own data without scraping.
+    """
+    import uuid
+
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a zip archive from Instagram data export"
+        )
+
+    job_id = str(uuid.uuid4())
+    temp_dir = Path(tempfile.mkdtemp())
+
+    try:
+        # Save uploaded zip
+        zip_path = temp_dir / "export.zip"
+        content = await file.read()
+        zip_path.write_bytes(content)
+
+        # Extract zip
+        extract_dir = temp_dir / "extracted"
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+
+        # Find posts JSON file (Instagram export structure varies)
+        posts_json = None
+        media_dir = None
+
+        for json_path in extract_dir.rglob("*.json"):
+            if "posts" in json_path.name.lower() or "content" in str(json_path.parent).lower():
+                posts_json = json_path
+                break
+
+        # Also check for your_instagram_activity structure
+        if not posts_json:
+            for json_path in extract_dir.rglob("posts_1.json"):
+                posts_json = json_path
+                break
+
+        if not posts_json:
+            # Try to find any posts-related JSON
+            for json_path in extract_dir.rglob("*.json"):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if isinstance(data, list) and len(data) > 0:
+                            first_item = data[0]
+                            if isinstance(first_item, dict) and ('media' in first_item or 'uri' in str(first_item)):
+                                posts_json = json_path
+                                break
+                except:
+                    continue
+
+        if not posts_json:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not find posts JSON in the export. Make sure this is a valid Instagram data export."
+            )
+
+        # Find media directory
+        for d in extract_dir.rglob("*"):
+            if d.is_dir() and ("media" in d.name.lower() or "posts" in d.name.lower()):
+                media_dir = d
+                break
+
+        if not media_dir:
+            media_dir = extract_dir
+
+        # Parse posts JSON
+        with open(posts_json, 'r', encoding='utf-8') as f:
+            posts_data = json.load(f)
+
+        # Handle different export formats
+        if isinstance(posts_data, dict) and 'ig_posts' in posts_data:
+            posts_data = posts_data['ig_posts']
+
+        results = {
+            "job_id": job_id,
+            "posts_found": 0,
+            "posts_imported": 0,
+            "faces_detected": 0,
+            "errors": []
+        }
+
+        for post_item in posts_data:
+            try:
+                # Extract post metadata (format varies)
+                if isinstance(post_item, dict):
+                    media_list = post_item.get('media', [post_item])
+                    if not isinstance(media_list, list):
+                        media_list = [media_list]
+                else:
+                    continue
+
+                results["posts_found"] += 1
+
+                for media in media_list:
+                    # Get URI and other data
+                    uri = media.get('uri', '')
+                    title = media.get('title', '')
+                    creation_timestamp = media.get('creation_timestamp', media.get('taken_at_timestamp'))
+
+                    if not uri:
+                        continue
+
+                    # Find the media file
+                    media_filename = Path(uri).name
+                    media_file = None
+
+                    for f in extract_dir.rglob(media_filename):
+                        media_file = f
+                        break
+
+                    if not media_file and uri:
+                        # Try relative path from extract dir
+                        potential_path = extract_dir / uri
+                        if potential_path.exists():
+                            media_file = potential_path
+
+                    # Generate shortcode from filename or timestamp
+                    shortcode = media_filename.rsplit('.', 1)[0] if media_filename else str(uuid.uuid4())[:11]
+
+                    # Create post in database
+                    posted_at = datetime.fromtimestamp(creation_timestamp) if creation_timestamp else datetime.utcnow()
+
+                    post_id = str(uuid.uuid4())
+                    image_urls = []
+
+                    # Copy media to uploads if found
+                    if media_file and media_file.exists():
+                        dest_dir = settings.UPLOAD_DIR / shortcode
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        dest_path = dest_dir / media_file.name
+                        shutil.copy2(media_file, dest_path)
+                        image_urls.append(f"/uploads/{shortcode}/{media_file.name}")
+
+                    # Create post node
+                    create_query = """
+                    MERGE (p:Post {shortcode: $shortcode})
+                    ON CREATE SET
+                        p.id = $id,
+                        p.caption = $caption,
+                        p.posted_at = datetime($posted_at),
+                        p.image_urls = $image_urls,
+                        p.created_at = datetime()
+                    ON MATCH SET
+                        p.updated_at = datetime()
+                    RETURN p.id as id
+                    """
+
+                    result = execute_write(create_query, {
+                        "id": post_id,
+                        "shortcode": shortcode,
+                        "caption": title or "",
+                        "posted_at": posted_at.isoformat(),
+                        "image_urls": image_urls
+                    })
+
+                    if result:
+                        actual_post_id = result[0]["id"]
+                        results["posts_imported"] += 1
+
+                        # Process faces if media file exists and flag is set
+                        if process_faces and media_file and media_file.exists():
+                            try:
+                                faces = face_recognition_service.detect_and_store_faces(
+                                    str(dest_path),
+                                    actual_post_id,
+                                    shortcode
+                                )
+                                results["faces_detected"] += len(faces)
+                            except Exception as face_error:
+                                logger.warning(f"Face detection failed for {shortcode}: {face_error}")
+
+            except Exception as e:
+                logger.error(f"Error importing post: {e}")
+                results["errors"].append(str(e))
+
+        results["status"] = "completed"
+        return results
+
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Invalid zip file")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in export file")
+    except Exception as e:
+        logger.error(f"Import failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Cleanup temp directory
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass

@@ -3,12 +3,16 @@ from typing import Optional
 import uuid
 from pathlib import Path
 import aiofiles
+import logging
 
 from app.core.config import settings
 from app.core.database import execute_query, execute_write
 from app.schemas.models import Post, PostCreate, PostAnalysis, FaceDetection
 from app.services.face_recognition_service import face_recognition_service
 from app.services.ai_service import ai_service
+from app.services.media_store import media_store
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/posts", tags=["posts"])
 
@@ -18,8 +22,8 @@ async def list_posts(skip: int = 0, limit: int = 100):
     """List all posts."""
     query = """
     MATCH (p:Post)
-    OPTIONAL MATCH (person:Person)-[:APPEARS_IN]->(p)
-    WITH p, count(person) as faces_detected
+    OPTIONAL MATCH (f:Face)-[:APPEARS_IN]->(p)
+    WITH p, count(f) as faces_detected
     RETURN p {.*, faces_detected: faces_detected} as post
     ORDER BY p.posted_at DESC
     SKIP $skip
@@ -35,8 +39,8 @@ async def get_post(post_id: str):
     """Get a post by ID."""
     query = """
     MATCH (p:Post {id: $id})
-    OPTIONAL MATCH (person:Person)-[:APPEARS_IN]->(p)
-    WITH p, count(person) as faces_detected
+    OPTIONAL MATCH (f:Face)-[:APPEARS_IN]->(p)
+    WITH p, count(f) as faces_detected
     RETURN p {.*, faces_detected: faces_detected} as post
     """
 
@@ -245,7 +249,10 @@ async def upload_and_analyze(
 
 @router.post("/{post_id}/process", response_model=PostAnalysis)
 async def process_post(post_id: str):
-    """Process a post for face detection."""
+    """Process a post for face detection.
+
+    Downloads images if needed and creates Face nodes for each detected face.
+    """
     # Get post
     query = """
     MATCH (p:Post {id: $id})
@@ -258,22 +265,40 @@ async def process_post(post_id: str):
 
     post_data = results[0]["p"]
     image_urls = post_data.get("image_urls", [])
+    shortcode = post_data.get("shortcode", post_id)
+
+    logger.info(f"Processing post {post_id} with {len(image_urls)} images")
 
     all_faces = []
 
-    for image_url in image_urls:
-        # Check if it's a local path
-        image_path = Path(image_url)
-        if image_path.exists():
-            faces = face_recognition_service.process_image_faces(image_path, post_id)
-            all_faces.extend(faces)
+    for idx, image_url in enumerate(image_urls):
+        # Ensure image is available locally
+        local_path = await media_store.ensure_local_image(
+            url=image_url,
+            shortcode=shortcode,
+            index=idx
+        )
 
-    # Mark as processed
+        if local_path:
+            logger.info(f"Processing image {local_path}")
+            # Use new detect_and_store_faces method that persists Face nodes
+            faces = face_recognition_service.detect_and_store_faces(
+                local_path, post_id, shortcode
+            )
+            all_faces.extend(faces)
+        else:
+            logger.warning(f"Could not get local image for {image_url[:100]}")
+
+    # Mark as processed (face count will be computed from Face nodes)
     query = """
     MATCH (p:Post {id: $id})
-    SET p.processed = true, p.faces_detected = $faces_count
+    OPTIONAL MATCH (f:Face)-[:APPEARS_IN]->(p)
+    WITH p, count(f) as face_count
+    SET p.processed = true, p.faces_detected = face_count
     """
-    execute_write(query, {"id": post_id, "faces_count": len(all_faces)})
+    execute_write(query, {"id": post_id})
+
+    logger.info(f"Finished processing post {post_id}: {len(all_faces)} faces found")
 
     return PostAnalysis(
         post_id=post_id,
@@ -284,18 +309,9 @@ async def process_post(post_id: str):
 
 @router.get("/{post_id}/faces")
 async def get_post_faces(post_id: str):
-    """Get all faces detected in a post."""
-    query = """
-    MATCH (person:Person)-[r:APPEARS_IN]->(p:Post {id: $id})
-    RETURN {
-        person_id: person.id,
-        person_name: person.name,
-        profile_image: person.profile_image
-    } as face
-    """
-
-    results = execute_query(query, {"id": post_id})
-    return [r["face"] for r in results]
+    """Get all faces detected in a post (Face nodes)."""
+    faces = face_recognition_service.get_faces_for_post(post_id)
+    return faces
 
 
 @router.get("/{post_id}/related")

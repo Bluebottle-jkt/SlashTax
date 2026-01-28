@@ -7,7 +7,7 @@ import logging
 
 from app.core.config import settings
 from app.core.database import init_database, Neo4jConnection
-from app.api.routes import persons, posts, graph, instagram
+from app.api.routes import persons, posts, graph, instagram, diagnostics, clusters
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +91,8 @@ app.include_router(persons.router, prefix="/api")
 app.include_router(posts.router, prefix="/api")
 app.include_router(graph.router, prefix="/api")
 app.include_router(instagram.router, prefix="/api")
+app.include_router(diagnostics.router, prefix="/api")
+app.include_router(clusters.router, prefix="/api")
 
 
 @app.get("/")
