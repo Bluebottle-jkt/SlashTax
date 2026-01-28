@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Build outputs
+.next/
+build/
+dist/
+*.egg-info/
+
+# Data
+data/uploads/*
+data/faces/*
+!data/uploads/.gitkeep
+!data/faces/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Neo4j
+neo4j_data/

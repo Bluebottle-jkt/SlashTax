@@ -1,0 +1,43 @@
+[project]
+name = "slashtax"
+version = "1.0.0"
+description = "Advanced Neo4j-powered face recognition and Instagram data extraction app"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.6",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "neo4j>=5.15.0",
+    "face-recognition>=1.3.0",
+    "opencv-python>=4.9.0.80",
+    "numpy>=1.26.0",
+    "pillow>=10.2.0",
+    "httpx>=0.26.0",
+    "instaloader>=4.10.0",
+    "python-dotenv>=1.0.0",
+    "aiofiles>=23.2.1",
+    "anthropic>=0.18.0",
+    "openai>=1.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.1.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
