@@ -21,6 +21,11 @@ import {
 import { personsApi, postsApi, graphApi, instagramApi } from '@/lib/api';
 import { formatDate, formatNumber, getNodeTypeColor } from '@/lib/utils';
 
+// Helper to get local image URL for a post
+const getPostImageUrl = (shortcode: string, index: number = 0): string => {
+  return `http://localhost:8000/uploads/${shortcode}/${shortcode}_${index}.jpg`;
+};
+
 // Dynamically import GraphVisualization to avoid SSR issues
 const GraphVisualization = dynamic(
   () => import('@/components/GraphVisualization'),
@@ -263,13 +268,17 @@ export default function Home() {
                   key={post.id}
                   className="bg-white rounded-lg shadow overflow-hidden card-hover"
                 >
-                  {post.image_urls[0] && (
-                    <img
-                      src={post.image_urls[0]}
-                      alt={post.shortcode}
-                      className="w-full h-48 object-cover"
-                    />
-                  )}
+                  <img
+                    src={getPostImageUrl(post.shortcode)}
+                    alt={post.shortcode}
+                    className="w-full h-48 object-cover"
+                    onError={(e) => {
+                      // Fallback to Instagram URL if local file doesn't exist
+                      if (post.image_urls[0]) {
+                        (e.target as HTMLImageElement).src = post.image_urls[0];
+                      }
+                    }}
+                  />
                   <div className="p-4">
                     <p className="text-sm text-gray-500 mb-2">
                       {post.caption?.slice(0, 100)}
